@@ -1,12 +1,16 @@
 from api import app
 import os
 import pandas as pd
+import numpy as np
 import json
 from flask import jsonify
 from flask import render_template
 from sklearn import preprocessing
 from sklearn import decomposition
 from sklearn.cluster import KMeans
+from sklearn.cross_validation import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn import metrics
 import matplotlib.pyplot as plt
 from flask import url_for
 
@@ -27,6 +31,7 @@ def get_data():
                 'cell_size', 'bare_nuclei', 'bland_chromatin', 'normal_nuclei',
                 'mitosis', 'class']
     df = pd.read_csv(f_name, sep=',', header=None, names=columns)
+    df = df.convert_objects(convert_numeric=True)
     return df.dropna()
 
 
@@ -69,8 +74,7 @@ def index():
     # Save fig
     fig_path = os.path.join(get_abs_path(), 'static', 'tmp', 'cluster.png')
     fig.savefig(fig_path)
-    return render_template('index.html', fig=url_for('static',
-                                                     filename='tmp/cluster.png'))
+    return render_template('index.html', fig="hello")
 
 
 @app.route('/d3')
@@ -102,8 +106,69 @@ def d3():
                                                filename='tmp/kmeans.csv'))
 
 
+def split_train_test(X, y):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=1)
+    return X_train, X_test, y_train, y_test
+
+
+def rfc(X_train, X_test, y_train):
+    fit = RandomForestClassifier().fit(X_train, y_train)
+    y_pred = fit.predict(X_test)
+    y_score = fit.predict_proba(X_test)[:,1]
+    return y_pred, y_score
+
+
+@app.route('/prediction')
+def prediction():
+    df = get_data()
+    X = df.ix[:, (df.columns != 'class') & (df.columns != 'code')].as_matrix()
+    y = df.ix[:, df.columns == 'class'].as_matrix()
+    y = np.where(y == 4, 1, 0)
+    # Split training and testing set
+    X_train, X_test, y_train, y_test = split_train_test(X, y)
+    # Random Forest
+    y_pred, y_score = rfc(X_train, X_test, y_train)
+    # ROC Plot
+    fig = plt.figure()
+    fpr, tpr, thresholds = metrics.roc_curve(y_test, y_score)
+    plt.plot(fpr, tpr, label='ROC curve (area = %f)'%metrics.roc_auc_score(y_test, y_score),
+             lw=4, color="#0000ff", marker='s',markerfacecolor="red")
+    plt.plot([0, 0], [1, 1])
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver operating characteristic')
+    plt.legend(loc="lower right")
+    # Save fig
+    fig_path = os.path.join(get_abs_path(), 'static', 'tmp', 'random_forest.png')
+    fig.savefig(fig_path)
+    return render_template('prediction.html', fig="ROC")
+
+
 @app.route('/head')
 def head():
     df = get_data().head()
     data = json.loads(df.to_json())
     return jsonify(data)
+
+
+@app.route('/api/v1/prediction_confusion_matrix')
+def confusion_matrix():
+    df = get_data()
+    X = df.ix[:, (df.columns != 'class') & (df.columns != 'code')].as_matrix()
+    y = df.ix[:, df.columns == 'class'].as_matrix()
+    # Split training and testing set
+    X_train, X_test, y_train, y_test = split_train_test(X, y)
+    # Random Forest
+    y_pred, y_score = rfc(X_train, X_test, y_train)
+    cm = metrics.confusion_matrix(y_test, y_pred)
+    d = {}
+    d['fp'] = cm[0,1]
+    d['tp'] = cm[1,1]
+    d['fn'] = cm[0,1]
+    d['tn'] = cm[0,0]
+    result = {'random forest': d}
+    return jsonify(result)
